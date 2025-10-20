@@ -1,0 +1,29 @@
+# CPU-only requirements for Estonian TTS
+TTS==0.22.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.1
+torchaudio>=2.4.1
+numpy<2.0.0
+scipy>=1.9.0
+transformers==4.37.2
+
+# Audio processing
+librosa>=0.9.0
+soundfile>=0.12.0
+
+# Web framework
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+
+# gRPC
+grpcio>=1.50.0
+grpcio-tools>=1.50.0
+protobuf>=4.0.0
+
+# Ray Serve
+ray[serve]>=2.0.0
+
+# Utilities
+pydantic>=2.0.0
+websockets>=11.0.0
+requests>=2.28.0

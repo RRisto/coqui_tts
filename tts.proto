@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package tts;
+
+// TTS service definition
+service TTSService {
+  // Synthesize text to speech
+  rpc Synthesize(SynthesizeRequest) returns (SynthesizeResponse);
+  
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Request message for synthesis
+message SynthesizeRequest {
+  string text = 1;        // Text to synthesize (required)
+}
+
+// Response message for synthesis
+message SynthesizeResponse {
+  bool success = 1;       // Whether synthesis was successful
+  string message = 2;     // Status message
+  bytes audio_data = 3;   // Audio data in WAV format
+  int32 sampling_rate = 4; // Audio sampling rate (typically 22050 Hz)
+  float duration = 5;     // Audio duration in seconds
+}
+
+// Health check request
+message HealthCheckRequest {
+  string service = 1;     // Service name to check (optional)
+}
+
+// Health check response
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
+  string message = 2;
+}
