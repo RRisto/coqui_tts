@@ -4,7 +4,10 @@ import logging
 import asyncio
 import json
 import base64
+import io
+import wave
 from pathlib import Path
+import numpy as np
 from typing import Optional
 
 # Configure logging
@@ -64,10 +67,9 @@ class CoquiTTSService:
     """Coqui TTS Service for Estonian text-to-speech"""
 
     def __init__(self, model_path: str = None, config_path: str = None):
-        # self.model_path = model_path or "/app/model/model_file.pth.tar"
-        # self.config_path = config_path or "app/model/config.json"
+        # Keep your defaults
         self.model_path = "/app/model/model_file.pth.tar"
-        self.config_path =  "model/config.json"
+        self.config_path = "model/config.json"
         self.model = None
         self.tts = None
         self._initialize_model()
@@ -77,23 +79,24 @@ class CoquiTTSService:
         try:
             logger.info("=== INITIALIZING COQUI TTS MODEL ===")
 
-            # Check if model path exists
             model_path = Path(self.model_path)
             config_path = Path(self.config_path)
             if not model_path.exists():
                 raise FileNotFoundError(f"Model path not found: {model_path}")
+            if not config_path.exists():
+                raise FileNotFoundError(f"Config path not found: {config_path}")
 
-            # Load the TTS model
-            # self.tts = TTS(model_path=str(model_path))
-            self.tts = model_path = TTS(model_path=model_path,
-                                     config_path=config_path)
+            # IMPORTANT: don't shadow model_path variable; force CPU
+            self.tts = TTS(model_path=str(model_path), config_path=str(config_path), gpu=False)
+
+            # --- keep your monkey patch exactly as requested ---
             import types
-
             def _patched_check_arguments(self, **kwargs):
                 # Skip checks; assume single-speaker, single-language
                 return
-
             self.tts._check_arguments = types.MethodType(_patched_check_arguments, self.tts)
+            # ---------------------------------------------------
+
             logger.info(f"TTS model loaded from: {model_path}")
             logger.info("=== MODEL INITIALIZATION COMPLETE ===")
 
@@ -101,8 +104,28 @@ class CoquiTTSService:
             logger.exception("Failed to initialize TTS model")
             raise
 
+    def _detect_sample_rate(self) -> int:
+        """Try to detect the real sample rate from the synthesizer/config."""
+        sr = None
+        try:
+            syn = getattr(self.tts, "synthesizer", None)
+            if syn is not None:
+                # Common in newer versions
+                sr = getattr(syn, "output_sample_rate", None)
+                if not sr:
+                    cfg = getattr(syn, "tts_config", None)
+                    if cfg is not None:
+                        audio = getattr(cfg, "audio", None)
+                        if isinstance(audio, dict):
+                            sr = audio.get("sample_rate")
+                        elif audio is not None:
+                            sr = getattr(audio, "sample_rate", None)
+        except Exception:
+            pass
+        return int(sr or 22050)
+
     def synthesize(self, text: str) -> dict:
-        """Synthesize text to speech using Coqui TTS"""
+        """Synthesize text to speech using Coqui TTS, return WAV bytes."""
         try:
             if not self.tts:
                 return {
@@ -110,44 +133,56 @@ class CoquiTTSService:
                     "message": "TTS model not initialized",
                     "audio_data": b"",
                     "sampling_rate": 0,
-                    "duration": 0.0
+                    "duration": 0.0,
+                    "format": "wav",
                 }
 
-            if not text.strip():
+            text = (text or "").strip()
+            if not text:
                 return {
                     "success": False,
                     "message": "No text provided",
                     "audio_data": b"",
                     "sampling_rate": 0,
-                    "duration": 0.0
+                    "duration": 0.0,
+                    "format": "wav",
                 }
 
             logger.info(f"Synthesizing text: '{text[:50]}{'...' if len(text) > 50 else ''}'")
 
-            # Generate audio
-            audio_data = self.tts.tts(text=text)
+            # Generate audio as float32 -1..1
+            wav = self.tts.tts(text=text)
+            if hasattr(wav, "numpy"):
+                wav = wav.numpy()
+            wav = np.asarray(wav, dtype=np.float32)
 
-            # Convert to bytes if needed
-            if hasattr(audio_data, 'numpy'):
-                audio_bytes = audio_data.numpy().tobytes()
-            elif isinstance(audio_data, (list, tuple)):
-                import numpy as np
-                audio_bytes = np.array(audio_data).tobytes()
-            else:
-                audio_bytes = audio_data
+            # Get correct sample rate
+            sampling_rate = self._detect_sample_rate()
 
-            # Get sampling rate (Coqui TTS typically uses 22050 Hz)
-            sampling_rate = 22050
-            duration = len(audio_bytes) / (sampling_rate * 2) if sampling_rate > 0 else 0.0
+            # Convert to int16 PCM
+            wav = np.clip(wav, -1.0, 1.0)
+            pcm16 = (wav * 32767.0).astype("<i2")
 
-            logger.info(f"Synthesis completed: {len(audio_bytes)} bytes, {duration:.2f}s")
+            # Make a proper WAV container
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as wf:
+                wf.setnchannels(1)     # mono (change if stereo)
+                wf.setsampwidth(2)     # 2 bytes → int16
+                wf.setframerate(sampling_rate)
+                wf.writeframes(pcm16.tobytes())
+            audio_bytes = buf.getvalue()
+
+            duration = float(len(pcm16)) / float(sampling_rate) if sampling_rate > 0 else 0.0
+
+            logger.info(f"Synthesis completed: {len(audio_bytes)} bytes WAV, {duration:.2f}s @ {sampling_rate} Hz")
 
             return {
                 "success": True,
                 "message": "Synthesis completed successfully",
-                "audio_data": audio_bytes,
+                "audio_data": audio_bytes,   # WAV bytes
                 "sampling_rate": sampling_rate,
-                "duration": duration
+                "duration": duration,
+                "format": "wav",
             }
 
         except Exception as e:
@@ -157,33 +192,24 @@ class CoquiTTSService:
                 "message": f"Synthesis failed: {str(e)}",
                 "audio_data": b"",
                 "sampling_rate": 0,
-                "duration": 0.0
+                "duration": 0.0,
+                "format": "wav",
             }
 
     def health_check(self) -> dict:
         """Check if the service is healthy"""
         try:
             if self.tts:
-                return {
-                    "status": "SERVING",
-                    "message": "TTS service is healthy"
-                }
+                return {"status": "SERVING", "message": "TTS service is healthy"}
             else:
-                return {
-                    "status": "NOT_SERVING",
-                    "message": "TTS service not initialized"
-                }
+                return {"status": "NOT_SERVING", "message": "TTS service not initialized"}
         except Exception as e:
             logger.exception("Health check failed")
-            return {
-                "status": "NOT_SERVING",
-                "message": f"Health check failed: {str(e)}"
-            }
+            return {"status": "NOT_SERVING", "message": f"Health check failed: {str(e)}"}
 
 
 # Global TTS service instance
 tts_service = None
-
 
 def initialize_tts_service():
     """Initialize the global TTS service"""
@@ -204,11 +230,10 @@ if GRPC_AVAILABLE and RAY_AVAILABLE:
         def Synthesize(self, request: SynthesizeRequest, context) -> SynthesizeResponse:
             """Synthesize text to speech via gRPC"""
             result = self.tts_service.synthesize(request.text)
-
             return SynthesizeResponse(
                 success=result["success"],
                 message=result["message"],
-                audio_data=result["audio_data"],
+                audio_data=result["audio_data"],        # raw WAV bytes on gRPC
                 sampling_rate=result["sampling_rate"],
                 duration=result["duration"]
             )
@@ -216,12 +241,10 @@ if GRPC_AVAILABLE and RAY_AVAILABLE:
         def HealthCheck(self, request: HealthCheckRequest, context) -> HealthCheckResponse:
             """Health check via gRPC"""
             result = self.tts_service.health_check()
-
             status_map = {
                 "SERVING": HealthCheckResponse.SERVING,
                 "NOT_SERVING": HealthCheckResponse.NOT_SERVING
             }
-
             return HealthCheckResponse(
                 status=status_map.get(result["status"], HealthCheckResponse.UNKNOWN),
                 message=result["message"]
@@ -237,17 +260,14 @@ if WEBSOCKET_AVAILABLE and RAY_AVAILABLE:
         async def synthesize_websocket(self, text: str) -> dict:
             """Synthesize text to speech for WebSocket"""
             result = self.tts_service.synthesize(text)
-
-            # Convert audio data to base64 for JSON transport
+            # Base64 WAV for JSON transport
             if result["success"] and result["audio_data"]:
                 result["audio_data"] = base64.b64encode(result["audio_data"]).decode('utf-8')
-
             return result
 
         async def health_check_websocket(self) -> dict:
             """Health check for WebSocket"""
             return self.tts_service.health_check()
-
 
     async def serve_websocket(port: int = 8080):
         """Start WebSocket server for TTS"""
@@ -264,22 +284,15 @@ if WEBSOCKET_AVAILABLE and RAY_AVAILABLE:
         async def websocket_synthesize(websocket: WebSocket):
             await websocket.accept()
             try:
-                # Receive synthesis request
                 data = await websocket.receive_text()
                 request_data = json.loads(data)
-
                 text = request_data.get("text", "")
-
                 if not text:
                     await websocket.send_json({"success": False, "message": "No text provided"})
                     return
 
                 logger.info(f"WebSocket synthesis request: text='{text[:50]}{'...' if len(text) > 50 else ''}'")
-
-                # Forward to Ray Serve
                 result = await handle.synthesize_websocket.remote(text)
-
-                # Send back synthesis result
                 await websocket.send_json(result)
                 logger.info(f"WebSocket synthesis completed: success={result.get('success', False)}")
 
@@ -291,7 +304,6 @@ if WEBSOCKET_AVAILABLE and RAY_AVAILABLE:
         async def websocket_health(websocket: WebSocket):
             await websocket.accept()
             try:
-                # Forward to Ray Serve
                 result = await handle.health_check_websocket.remote()
                 await websocket.send_json(result)
             except Exception as e:
@@ -329,7 +341,6 @@ def main():
         logger.error("Ray not available. Please install Ray.")
         sys.exit(1)
 
-    # Get port from environment or command line
     port = int(os.getenv("PORT", "8080"))
     server_type = os.getenv("SERVER_TYPE", "websocket").lower()
 
@@ -337,21 +348,16 @@ def main():
     logger.info(f"Current directory: {os.getcwd()}")
     logger.info(f"Python path: {sys.path}")
 
-    # Initialize Ray
     import ray
     ray.init()
-
     if server_type == "websocket":
         if not WEBSOCKET_AVAILABLE:
             logger.error("WebSocket dependencies not available. Install fastapi and uvicorn.")
             sys.exit(1)
 
-        # Start Ray Serve for WebSocket
         serve.start()
         serve.run(TTSWebSocketService.bind(), name="tts-websocket")
         logger.info("Ray Serve WebSocket deployment started")
-
-        # Start WebSocket server
         asyncio.run(serve_websocket(port=port))
 
     elif server_type == "grpc":
@@ -359,7 +365,6 @@ def main():
             logger.error("gRPC dependencies not available.")
             sys.exit(1)
 
-        # Start Ray Serve with gRPC
         serve.start(
             grpc_options=gRPCOptions(
                 port=port,
@@ -369,7 +374,6 @@ def main():
         serve.run(TTSGrpcServicer.bind(), name="tts")
         logger.info(f"gRPC server ready on port {port}")
 
-        # Keep the process alive
         import threading
         threading.Event().wait()
 
