@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE_NAME="coqui-et-tts"
+IMAGE_NAME="et-tts-coqui"
 IMAGE_TAG="0.1"
 
 docker run --rm \

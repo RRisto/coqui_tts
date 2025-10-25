@@ -223,11 +223,11 @@ def initialize_tts_service():
 # gRPC Service Implementation
 if GRPC_AVAILABLE and RAY_AVAILABLE:
     @serve.deployment(ray_actor_options={"num_cpus": 1}, name="tts")
-    class TTSGrpcServicer(TTSServiceServicer):
+    class TTSGrpcServicer:
         def __init__(self):
             self.tts_service = initialize_tts_service()
 
-        def Synthesize(self, request: SynthesizeRequest, context) -> SynthesizeResponse:
+        def Synthesize(self, request: SynthesizeRequest) -> SynthesizeResponse:
             """Synthesize text to speech via gRPC"""
             result = self.tts_service.synthesize(request.text)
             return SynthesizeResponse(
@@ -238,7 +238,7 @@ if GRPC_AVAILABLE and RAY_AVAILABLE:
                 duration=result["duration"]
             )
 
-        def HealthCheck(self, request: HealthCheckRequest, context) -> HealthCheckResponse:
+        def HealthCheck(self, request: HealthCheckRequest) -> HealthCheckResponse:
             """Health check via gRPC"""
             result = self.tts_service.health_check()
             status_map = {
